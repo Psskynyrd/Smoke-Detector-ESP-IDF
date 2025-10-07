@@ -1,0 +1,44 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPathWin": "c:\\Espressif\\frameworks\\esp-idf-v5.4.2",
+  "idf.pythonInstallPath": "C:\\Users\\pasup\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ],
+  "idf.portWin": "COM5",
+  "idf.toolsPathWin": "C:\\Users\\pasup\\.espressif",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "clangd.path": "C:\\Users\\pasup\\.espressif\\tools\\esp-clang\\esp-18.1.2_20240912\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=C:\\Users\\pasup\\.espressif\\tools\\xtensa-esp-elf\\esp-14.2.0_20241119\\xtensa-esp-elf\\bin\\xtensa-esp32-elf-gcc.exe",
+    "--compile-commands-dir=${workspaceFolder}\\build"
+  ],
+  "idf.flashType": "UART",
+  "files.associations": {
+    "*.embeddedhtml": "html",
+    "esp_log.h": "c",
+    "format": "c",
+    "thread": "c",
+    "gpio.h": "c",
+    "stdio.h": "c",
+    "err.h": "c",
+    "sys.h": "c",
+    "esp_event.h": "c",
+    "freertos.h": "c",
+    "array": "c",
+    "string": "c",
+    "string_view": "c",
+    "span": "c",
+    "ble_handler.h": "c",
+    "task.h": "c",
+    "nvs_flash.h": "c",
+    "wifi.h": "c",
+    "buzzer.h": "c",
+    "mq2.h": "c",
+    "esp32-dht11.h": "c"
+  },
+  "C_Cpp.errorSquiggles": "disabled"
+}

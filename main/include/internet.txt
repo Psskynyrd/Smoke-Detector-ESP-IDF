@@ -1,0 +1,301 @@
+#ifndef __INTERNET__
+#define __INTERNET__
+#include <driver/gpio.h>
+#include <rom/ets_sys.h>
+#include "lwip/sockets.h"
+#include "lwip/dns.h"
+#include "esp_mac.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include "esp_err.h"
+
+#ifndef CONFIG_LOG_MAXIMUM_LEVEL
+#define CONFIG_LOG_MAXIMUM_LEVEL 5 // 5 = ESP_LOG_VERBOSE
+#endif
+
+// ============================================================================
+// WiFi Configuration
+// ============================================================================
+
+/**
+ * WiFi connection parameters structure
+ */
+typedef struct
+{
+    char ssid[32];       // WiFi SSID (network name)
+    char password[64];   // WiFi password
+    uint8_t max_retry;   // Maximum connection retry attempts (0 = infinite)
+    uint32_t timeout_ms; // Connection timeout in milliseconds
+} wifi_config_t;
+
+/**
+ * Initialize WiFi in station mode
+ */
+void wifi_init_sta(void);
+
+/**
+ * WiFi connection status
+ */
+typedef enum
+{
+    WIFI_STATUS_DISCONNECTED,
+    WIFI_STATUS_CONNECTING,
+    WIFI_STATUS_CONNECTED,
+    WIFI_STATUS_FAILED
+} wifi_status_t;
+
+// ============================================================================
+// WiFi Functions
+// ============================================================================
+
+/**
+ * Initialize WiFi system
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t wifi_init(void);
+
+/**
+ * Connect to WiFi with parameters
+ * @param ssid WiFi network name
+ * @param password WiFi password
+ * @param max_retry Maximum retry attempts (0 = infinite)
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t wifi_connect(const char *ssid, const char *password, uint8_t max_retry);
+
+/**
+ * Connect to WiFi with config structure
+ * @param config Pointer to wifi_config_t structure
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t wifi_connect_with_config(const wifi_config_t *config);
+
+/**
+ * Disconnect from WiFi
+ * @return ESP_OK on success
+ */
+esp_err_t wifi_disconnect(void);
+
+/**
+ * Get WiFi connection status
+ * @return Current WiFi status
+ */
+wifi_status_t wifi_get_status(void);
+
+/**
+ * Check if WiFi is connected
+ * @return true if connected, false otherwise
+ */
+bool wifi_is_connected(void);
+
+/**
+ * Get IP address as string
+ * @param ip_str Buffer to store IP address string
+ * @param max_len Maximum buffer length
+ * @return ESP_OK on success
+ */
+esp_err_t wifi_get_ip_address(char *ip_str, size_t max_len);
+
+/**
+ * Get WiFi RSSI (signal strength)
+ * @return RSSI value in dBm
+ */
+int8_t wifi_get_rssi(void);
+
+// ============================================================================
+// WebSocket Functions
+// ============================================================================
+
+/**
+ * WebSocket configuration structure
+ */
+typedef struct
+{
+    char uri[256];       // WebSocket URI (ws://example.com:port/path)
+    uint32_t timeout_ms; // Connection timeout
+    bool auto_reconnect; // Auto-reconnect on disconnect
+} websocket_config_t;
+
+/**
+ * Initialize WebSocket client
+ * @param uri WebSocket server URI (e.g., "ws://192.168.1.100:8080/ws")
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t websocket_init(const char *uri);
+
+/**
+ * Initialize WebSocket with configuration
+ * @param config Pointer to websocket_config_t structure
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t websocket_init_with_config(const websocket_config_t *config);
+
+/**
+ * Connect to WebSocket server
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t websocket_connect(void);
+
+/**
+ * Disconnect from WebSocket server
+ * @return ESP_OK on success
+ */
+esp_err_t websocket_disconnect(void);
+
+/**
+ * Send text message via WebSocket
+ * @param message Text message to send
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t websocket_send_text(const char *message);
+
+/**
+ * Send binary data via WebSocket
+ * @param data Binary data buffer
+ * @param len Length of data
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t websocket_send_binary(const uint8_t *data, size_t len);
+
+/**
+ * Send sensor data as JSON via WebSocket
+ * @param mq2_value MQ-2 sensor value
+ * @param fire_detected Fire sensor status
+ * @param temperature Temperature value
+ * @param humidity Humidity value
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t websocket_send_sensor_data(uint16_t mq2_value, uint8_t fire_detected,
+                                     float temperature, float humidity);
+
+/**
+ * Check if WebSocket is connected
+ * @return true if connected, false otherwise
+ */
+bool websocket_is_connected(void);
+
+/**
+ * Register callback for received WebSocket messages
+ * @param callback Function pointer: void callback(const char* data, size_t len)
+ */
+void websocket_register_receive_callback(void (*callback)(const char *data, size_t len));
+
+// ============================================================================
+// Firebase Functions
+// ============================================================================
+
+/**
+ * Firebase configuration structure
+ */
+typedef struct
+{
+    char database_url[256]; // Firebase database URL
+    char api_key[64];       // Firebase API key (optional for RTDB)
+    char auth_token[512];   // Firebase auth token (optional)
+    uint32_t timeout_ms;    // Request timeout
+} firebase_config_t;
+
+/**
+ * Initialize Firebase connection
+ * @param database_url Firebase Realtime Database URL
+ *                     (e.g., "https://your-project.firebaseio.com")
+ * @param api_key Firebase API key (optional, can be NULL)
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_init(const char *database_url, const char *api_key);
+
+/**
+ * Initialize Firebase with configuration
+ * @param config Pointer to firebase_config_t structure
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_init_with_config(const firebase_config_t *config);
+
+/**
+ * Set data to Firebase path (creates or updates)
+ * @param path Firebase path (e.g., "/sensors/device1")
+ * @param json_data JSON string to send
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_set_data(const char *path, const char *json_data);
+
+/**
+ * Update data at Firebase path (partial update)
+ * @param path Firebase path
+ * @param json_data JSON string with fields to update
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_update_data(const char *path, const char *json_data);
+
+/**
+ * Get data from Firebase path
+ * @param path Firebase path
+ * @param response_buffer Buffer to store response
+ * @param buffer_size Size of response buffer
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_get_data(const char *path, char *response_buffer, size_t buffer_size);
+
+/**
+ * Delete data at Firebase path
+ * @param path Firebase path to delete
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_delete_data(const char *path);
+
+/**
+ * Push data to Firebase (generates unique key)
+ * @param path Firebase path
+ * @param json_data JSON string to push
+ * @param key_buffer Buffer to store generated key (optional, can be NULL)
+ * @param key_buffer_size Size of key buffer
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_push_data(const char *path, const char *json_data,
+                             char *key_buffer, size_t key_buffer_size);
+
+/**
+ * Send sensor data to Firebase
+ * @param device_id Device identifier
+ * @param mq2_value MQ-2 sensor value
+ * @param fire_detected Fire sensor status
+ * @param temperature Temperature value
+ * @param humidity Humidity value
+ * @return ESP_OK on success, ESP_FAIL on failure
+ */
+esp_err_t firebase_send_sensor_data(const char *device_id, uint16_t mq2_value,
+                                    uint8_t fire_detected, float temperature,
+                                    float humidity);
+
+/**
+ * Set Firebase authentication token
+ * @param token Authentication token
+ * @return ESP_OK on success
+ */
+esp_err_t firebase_set_auth_token(const char *token);
+
+/**
+ * Check if Firebase is initialized
+ * @return true if initialized, false otherwise
+ */
+bool firebase_is_initialized(void);
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/**
+ * Get current timestamp in milliseconds
+ * @return Timestamp in milliseconds since boot
+ */
+uint64_t get_timestamp_ms(void);
+
+/**
+ * Get ISO 8601 timestamp string
+ * @param buffer Buffer to store timestamp
+ * @param buffer_size Size of buffer
+ * @return ESP_OK on success
+ */
+esp_err_t get_iso_timestamp(char *buffer, size_t buffer_size);
+
+#endif
