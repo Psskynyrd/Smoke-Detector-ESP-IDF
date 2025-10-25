@@ -38,7 +38,17 @@
     "wifi.h": "c",
     "buzzer.h": "c",
     "mq2.h": "c",
-    "esp32-dht11.h": "c"
+    "esp32-dht11.h": "c",
+    "mqtt_client.h": "c",
+    "internet.h": "c",
+    "ets_sys.h": "c",
+    "string.h": "c",
+    "random": "cpp",
+    "chrono": "c",
+    "limits": "c",
+    "stdlib.h": "c",
+    "esp_mac.h": "c"
   },
-  "C_Cpp.errorSquiggles": "disabled"
+  "C_Cpp.errorSquiggles": "disabled",
+  "idf.monitorPort": "COM5"
 }

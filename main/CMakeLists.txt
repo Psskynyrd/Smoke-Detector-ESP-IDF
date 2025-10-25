@@ -9,7 +9,7 @@ file(GLOB SRC_FILES
 )
 idf_component_register(SRCS ${SRC_FILES}
     INCLUDE_DIRS "include" "modules" "."
-    REQUIRES driver esp_wifi esp_event nvs_flash lwip mqtt bt esp_http_client esp_netif mbedtls)
+    REQUIRES driver esp_wifi esp_event nvs_flash lwip mqtt bt esp_http_client esp_netif mbedtls json)
 
 # idf_component_register(
 #     SRCS ${SRC_FILES}

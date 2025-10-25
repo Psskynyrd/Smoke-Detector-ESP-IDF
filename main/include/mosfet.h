@@ -1,5 +1,5 @@
-#ifndef _BUZZER
-#define _BUZZER
+#ifndef __MOSFET_H__
+#define __MOSFET_H__
 #include <driver/gpio.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,13 +14,13 @@
 
 typedef struct
 {
-    int buzzer_pin; 
-} buzzer_t;
+    int mosfet_pin; 
+} mosfet_t;
 
-void buzzer_init(buzzer_t *buzzer);
-void buzzer_on(buzzer_t *buzzer);
-void buzzer_off(buzzer_t *buzzer);
-void buzzer_blink(buzzer_t *buzzer, int high_interval_ms, int low_interval_ms);
+void mosfet_init(mosfet_t *mosfet);
+void mosfet_on(mosfet_t *mosfet);
+void mosfet_off(mosfet_t *mosfet);
+void mosfet_blink(mosfet_t *mosfet, int high_interval_ms, int low_interval_ms);
 
 
 #endif

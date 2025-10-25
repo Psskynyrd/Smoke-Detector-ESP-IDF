@@ -8,6 +8,28 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "config.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <time.h>
+#include <sys/time.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_http_client.h"
+#include "esp_tls.h"
+
+#include "nvs_flash.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
 
 #ifndef CONFIG_LOG_MAXIMUM_LEVEL
 #define CONFIG_LOG_MAXIMUM_LEVEL 5 // 5 = ESP_LOG_VERBOSE
@@ -22,16 +44,16 @@
  */
 typedef struct
 {
-    char ssid[32];       // WiFi SSID (network name)
-    char password[64];   // WiFi password
+    char ssid[255];       // WiFi SSID (network name)
+    char password[255];   // WiFi password
     uint8_t max_retry;   // Maximum connection retry attempts (0 = infinite)
     uint32_t timeout_ms; // Connection timeout in milliseconds
-} wifi_config_t;
+} internet_config_t;
 
 /**
  * Initialize WiFi in station mode
  */
-void wifi_init_sta(void);
+esp_err_t wifi_init_sta(void);
 
 /**
  * WiFi connection status
@@ -68,7 +90,7 @@ esp_err_t wifi_connect(const char *ssid, const char *password, uint8_t max_retry
  * @param config Pointer to wifi_config_t structure
  * @return ESP_OK on success, ESP_FAIL on failure
  */
-esp_err_t wifi_connect_with_config(const wifi_config_t *config);
+esp_err_t wifi_connect_with_config(const internet_config_t *config);
 
 /**
  * Disconnect from WiFi
@@ -101,6 +123,9 @@ esp_err_t wifi_get_ip_address(char *ip_str, size_t max_len);
  * @return RSSI value in dBm
  */
 int8_t wifi_get_rssi(void);
+
+
+// esp_err_t wifi_deinit(void);
 
 // ============================================================================
 // WebSocket Functions

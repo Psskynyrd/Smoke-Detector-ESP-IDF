@@ -1,0 +1,1028 @@
+#include "internet.h"
+
+#define WIFI_SSID CONFIG_WIFI_SSID
+#define WIFI_PASS CONFIG_WIFI_PASSWORD
+#define WIFI_MAX_RETRY CONFIG_WIFI_MAX_RETRY
+#define WIFI_TIMEOUT_MS CONFIG_WIFI_TIMEOUT_MS
+
+#define PORT 3333
+
+static const char *TAG = "INTERNET";
+
+// ============================================================================
+// WiFi Variables
+// ============================================================================
+
+static EventGroupHandle_t s_wifi_event_group = NULL;
+static esp_netif_t *sta_netif = NULL;
+static wifi_status_t wifi_status = WIFI_STATUS_DISCONNECTED;
+static int s_retry_num = 0;
+static int s_max_retry = 5;
+static bool wifi_initialized = false;
+static SemaphoreHandle_t wifi_status_mutex = NULL;
+
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
+
+// ============================================================================
+// WebSocket Variables
+// ============================================================================
+
+// static esp_websocket_client_handle_t ws_client = NULL;
+// static bool ws_connected = false;
+// static void (*ws_receive_callback)(const char *data, size_t len) = NULL;
+
+// ============================================================================
+// Firebase Variables
+// ============================================================================
+
+// static char firebase_url[256] = {0};
+// static char firebase_api_key[64] = {0};
+// static char firebase_auth_token[512] = {0};
+// static bool firebase_initialized = false;
+
+// #pragma region WiFi
+
+// ============================================================================
+// WiFi Event Handler
+// ============================================================================
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
+        ESP_LOGI(TAG, "WiFi started, connecting...");
+        wifi_status = WIFI_STATUS_CONNECTING;
+        esp_wifi_connect();
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        if (s_max_retry == 0 || s_retry_num < s_max_retry)
+        {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "Retry connecting to WiFi... (%d/%d)", s_retry_num, s_max_retry);
+            wifi_status = WIFI_STATUS_CONNECTING;
+        }
+        else
+        {
+            if (s_wifi_event_group != NULL)
+            {
+                xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            }
+            wifi_status = WIFI_STATUS_FAILED;
+            ESP_LOGE(TAG, "Failed to connect to WiFi");
+        }
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "✅ WiFi connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        
+        s_retry_num = 0;
+        if (s_wifi_event_group != NULL)
+        {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        }
+        wifi_status = WIFI_STATUS_CONNECTED;
+    }
+}
+
+// ============================================================================
+// WiFi Initialization (Call once at startup)
+// ============================================================================
+
+esp_err_t wifi_init(void)
+{
+    if (wifi_initialized)
+    {
+        ESP_LOGW(TAG, "WiFi already initialized");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Initializing WiFi...");
+
+    // Initialize NVS (required for WiFi)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_LOGW(TAG, "NVS partition was truncated, erasing...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialize TCP/IP stack
+    ESP_ERROR_CHECK(esp_netif_init());
+
+    // Create default event loop
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Create WiFi station network interface
+    sta_netif = esp_netif_create_default_wifi_sta();
+    if (sta_netif == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create WiFi station interface");
+        return ESP_FAIL;
+    }
+
+    // Initialize WiFi with default config
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Create event group for WiFi events
+    s_wifi_event_group = xEventGroupCreate();
+    if (s_wifi_event_group == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create event group");
+        return ESP_FAIL;
+    }
+
+    // Create mutex
+    wifi_status_mutex = xSemaphoreCreateMutex();
+    if (wifi_status_mutex == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return ESP_FAIL;
+    }
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+
+    // Set WiFi mode to station
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Start WiFi
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    wifi_initialized = true;
+    ESP_LOGI(TAG, "WiFi initialized successfully");
+    return ESP_OK;
+}
+
+// ============================================================================
+// WiFi Connect (Call after wifi_init)
+// ============================================================================
+
+esp_err_t wifi_connect(const char *ssid, const char *password, uint8_t max_retry)
+{
+    ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", ssid);
+    if (ssid == NULL || password == NULL)
+    {
+        ESP_LOGE(TAG, "SSID or password is NULL");
+        return ESP_FAIL;
+    }
+
+    if (!wifi_initialized)
+    {
+        ESP_LOGE(TAG, "WiFi not initialized. Call wifi_init() first.");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Connecting to WiFi: %s", ssid);
+
+    s_max_retry = max_retry;
+    s_retry_num = 0;
+
+    // Clear event group bits
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+
+    // Configure WiFi
+    wifi_config_t wifi_config = {0};
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+
+    // Set WiFi configuration
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    // Connect to WiFi
+    esp_err_t ret = esp_wifi_connect();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to start WiFi connection: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "WiFi connection started, waiting for result...");
+
+    // Wait for connection or failure
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT)
+    {
+        ESP_LOGI(TAG, "✅ Connected to WiFi: %s", ssid);
+        return ESP_OK;
+    }
+    else if (bits & WIFI_FAIL_BIT)
+    {
+        ESP_LOGE(TAG, "❌ Failed to connect to WiFi: %s", ssid);
+        return ESP_FAIL;
+    }
+    else
+    {
+        ESP_LOGE(TAG, "❌ Unexpected WiFi connection event");
+        return ESP_FAIL;
+    }
+}
+
+esp_err_t wifi_connect_with_config(const internet_config_t *config)
+{
+    ESP_LOGI(TAG, "Connecting to WiFi with provided config...");
+    if (!wifi_initialized)
+    {
+        ESP_LOGE(TAG, "WiFi not initialized. Call wifi_init() first.");
+        return ESP_FAIL;
+    }
+
+    if (config == NULL)
+    {
+        ESP_LOGE(TAG, "WiFi config is NULL");
+        return ESP_FAIL;
+    }
+
+    return wifi_connect(config->ssid, config->password, config->max_retry);
+}
+
+esp_err_t wifi_disconnect(void)
+{
+    if (!wifi_initialized)
+    {
+        ESP_LOGE(TAG, "WiFi not initialized");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Disconnecting WiFi...");
+    esp_err_t ret = esp_wifi_disconnect();
+    if (ret == ESP_OK)
+    {
+        wifi_status = WIFI_STATUS_DISCONNECTED;
+        ESP_LOGI(TAG, "WiFi disconnected");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to disconnect WiFi: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+wifi_status_t wifi_get_status(void)
+{
+    wifi_status_t status;
+    if (wifi_status_mutex != NULL)
+    {
+        xSemaphoreTake(wifi_status_mutex, portMAX_DELAY);
+        status = wifi_status;
+        xSemaphoreGive(wifi_status_mutex);
+        return status;
+    }
+    return wifi_status;
+}
+
+bool wifi_is_connected(void)
+{
+    return (wifi_status == WIFI_STATUS_CONNECTED);
+}
+
+esp_err_t wifi_get_ip_address(char *ip_str, size_t max_len)
+{
+    if (ip_str == NULL || max_len < 16)
+    {
+        ESP_LOGE(TAG, "Invalid parameters for wifi_get_ip_address");
+        return ESP_FAIL;
+    }
+
+    if (!wifi_is_connected() || sta_netif == NULL)
+    {
+        strncpy(ip_str, "0.0.0.0", max_len);
+        return ESP_FAIL;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    esp_err_t ret = esp_netif_get_ip_info(sta_netif, &ip_info);
+    if (ret == ESP_OK)
+    {
+        snprintf(ip_str, max_len, IPSTR, IP2STR(&ip_info.ip));
+        return ESP_OK;
+    }
+    else
+    {
+        strncpy(ip_str, "0.0.0.0", max_len);
+        return ESP_FAIL;
+    }
+}
+
+int8_t wifi_get_rssi(void)
+{
+    if (!wifi_is_connected())
+    {
+        return -100;
+    }
+
+    wifi_ap_record_t ap_info;
+    esp_err_t ret = esp_wifi_sta_get_ap_info(&ap_info);
+    if (ret == ESP_OK)
+    {
+        return ap_info.rssi;
+    }
+    return -100; // Return weak signal if error
+}
+
+// esp_err_t wifi_deinit(void)
+// {
+//     if (!wifi_initialized)
+//     {
+//         return ESP_OK;
+//     }
+
+//     esp_wifi_stop();
+//     esp_wifi_deinit();
+
+//     if (s_wifi_event_group != NULL)
+//     {
+//         vEventGroupDelete(s_wifi_event_group);
+//         s_wifi_event_group = NULL;
+//     }
+
+//     if (wifi_status_mutex != NULL)
+//     {
+//         vSemaphoreDelete(wifi_status_mutex);
+//         wifi_status_mutex = NULL;
+//     }
+
+//     wifi_initialized = false;
+//     return ESP_OK;
+// }
+
+// #pragma endregion
+
+// #pragma region WebSocket
+// // ============================================================================
+// // WebSocket Event Handler
+// // ============================================================================
+
+// static void websocket_event_handler(void *handler_args, esp_event_base_t base,
+//                                     int32_t event_id, void *event_data)
+// {
+//     esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+
+//     switch (event_id)
+//     {
+//     case WEBSOCKET_EVENT_CONNECTED:
+//         ESP_LOGI(TAG, "🔌 WebSocket connected");
+//         ws_connected = true;
+//         break;
+
+//     case WEBSOCKET_EVENT_DISCONNECTED:
+//         ESP_LOGI(TAG, "🔌 WebSocket disconnected");
+//         ws_connected = false;
+//         break;
+
+//     case WEBSOCKET_EVENT_DATA:
+//         ESP_LOGI(TAG, "📥 WebSocket received data: %.*s", data->data_len, (char *)data->data_ptr);
+//         if (ws_receive_callback != NULL)
+//         {
+//             ws_receive_callback((const char *)data->data_ptr, data->data_len);
+//         }
+//         break;
+
+//     case WEBSOCKET_EVENT_ERROR:
+//         ESP_LOGE(TAG, "❌ WebSocket error");
+//         ws_connected = false;
+//         break;
+
+//     default:
+//         break;
+//     }
+// }
+
+// // ============================================================================
+// // WebSocket Functions Implementation
+// // ============================================================================
+
+// esp_err_t websocket_init(const char *uri)
+// {
+//     if (uri == NULL)
+//     {
+//         ESP_LOGE(TAG, "WebSocket URI is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     ESP_LOGI(TAG, "Initializing WebSocket: %s", uri);
+
+//     esp_websocket_client_config_t ws_cfg = {
+//         .uri = uri,
+//         .task_stack = 4096,
+//         .buffer_size = 1024,
+//     };
+
+//     ws_client = esp_websocket_client_init(&ws_cfg);
+//     if (ws_client == NULL)
+//     {
+//         ESP_LOGE(TAG, "Failed to initialize WebSocket client");
+//         return ESP_FAIL;
+//     }
+
+//     esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY,
+//                                   websocket_event_handler, NULL);
+
+//     ESP_LOGI(TAG, "✅ WebSocket initialized");
+//     return ESP_OK;
+// }
+
+// esp_err_t websocket_init_with_config(const websocket_config_t *config)
+// {
+//     if (config == NULL)
+//     {
+//         ESP_LOGE(TAG, "WebSocket config is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     return websocket_init(config->uri);
+// }
+
+// esp_err_t websocket_connect(void)
+// {
+//     if (ws_client == NULL)
+//     {
+//         ESP_LOGE(TAG, "WebSocket not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     ESP_LOGI(TAG, "Connecting to WebSocket server...");
+//     esp_err_t ret = esp_websocket_client_start(ws_client);
+
+//     if (ret == ESP_OK)
+//     {
+//         ESP_LOGI(TAG, "✅ WebSocket connection initiated");
+//     }
+//     else
+//     {
+//         ESP_LOGE(TAG, "❌ Failed to connect to WebSocket");
+//     }
+
+//     return ret;
+// }
+
+// esp_err_t websocket_disconnect(void)
+// {
+//     if (ws_client == NULL)
+//     {
+//         return ESP_FAIL;
+//     }
+
+//     ESP_LOGI(TAG, "Disconnecting WebSocket...");
+//     esp_err_t ret = esp_websocket_client_stop(ws_client);
+//     ws_connected = false;
+//     return ret;
+// }
+
+// esp_err_t websocket_send_text(const char *message)
+// {
+//     if (ws_client == NULL || message == NULL)
+//     {
+//         ESP_LOGE(TAG, "WebSocket client or message is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     if (!ws_connected)
+//     {
+//         ESP_LOGW(TAG, "WebSocket not connected");
+//         return ESP_FAIL;
+//     }
+
+//     int len = esp_websocket_client_send_text(ws_client, message, strlen(message),
+//                                              portMAX_DELAY);
+
+//     if (len < 0)
+//     {
+//         ESP_LOGE(TAG, "Failed to send WebSocket message");
+//         return ESP_FAIL;
+//     }
+
+//     ESP_LOGI(TAG, "📤 WebSocket sent: %s", message);
+//     return ESP_OK;
+// }
+
+// esp_err_t websocket_send_binary(const uint8_t *data, size_t len)
+// {
+//     if (ws_client == NULL || data == NULL)
+//     {
+//         ESP_LOGE(TAG, "WebSocket client or data is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     if (!ws_connected)
+//     {
+//         ESP_LOGW(TAG, "WebSocket not connected");
+//         return ESP_FAIL;
+//     }
+
+//     int sent = esp_websocket_client_send_bin(ws_client, (const char *)data, len,
+//                                              portMAX_DELAY);
+
+//     if (sent < 0)
+//     {
+//         ESP_LOGE(TAG, "Failed to send WebSocket binary data");
+//         return ESP_FAIL;
+//     }
+
+//     ESP_LOGI(TAG, "📤 WebSocket sent binary: %d bytes", sent);
+//     return ESP_OK;
+// }
+
+// esp_err_t websocket_send_sensor_data(uint16_t mq2_value, uint8_t fire_detected,
+//                                      float temperature, float humidity)
+// {
+//     char json_data[256];
+//     int len = snprintf(json_data, sizeof(json_data),
+//                        "{\"mq2\":%d,\"fire\":%d,\"temp\":%.1f,\"hum\":%.1f,\"timestamp\":%lld}",
+//                        mq2_value, fire_detected, temperature, humidity,
+//                        get_timestamp_ms());
+
+//     if (len >= sizeof(json_data))
+//     {
+//         ESP_LOGE(TAG, "JSON data too long");
+//         return ESP_FAIL;
+//     }
+
+//     return websocket_send_text(json_data);
+// }
+
+// bool websocket_is_connected(void)
+// {
+//     return ws_connected;
+// }
+
+// void websocket_register_receive_callback(void (*callback)(const char *data, size_t len))
+// {
+//     ws_receive_callback = callback;
+//     if (callback != NULL)
+//     {
+//         ESP_LOGI(TAG, "WebSocket receive callback registered");
+//     }
+//     else
+//     {
+//         ESP_LOGI(TAG, "WebSocket receive callback unregistered");
+//     }
+// }
+// #pragma endregion
+
+// #pragma region Firebase
+// // ============================================================================
+// // Firebase HTTP Response Handler
+// // ============================================================================
+
+// static char firebase_response_buffer[2048] = {0};
+// static int firebase_response_len = 0;
+
+// static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+// {
+//     switch (evt->event_id)
+//     {
+//     case HTTP_EVENT_ON_DATA:
+//         if (firebase_response_len + evt->data_len < sizeof(firebase_response_buffer))
+//         {
+//             memcpy(firebase_response_buffer + firebase_response_len,
+//                    evt->data, evt->data_len);
+//             firebase_response_len += evt->data_len;
+//             firebase_response_buffer[firebase_response_len] = '\0';
+//         }
+//         break;
+//     default:
+//         break;
+//     }
+//     return ESP_OK;
+// }
+
+// // ============================================================================
+// // Firebase Functions Implementation
+// // ============================================================================
+
+// esp_err_t firebase_init(const char *database_url, const char *api_key)
+// {
+//     if (database_url == NULL)
+//     {
+//         ESP_LOGE(TAG, "Firebase database URL is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     ESP_LOGI(TAG, "Initializing Firebase...");
+//     ESP_LOGI(TAG, "Database URL: %s", database_url);
+
+//     strncpy(firebase_url, database_url, sizeof(firebase_url) - 1);
+
+//     if (api_key != NULL)
+//     {
+//         strncpy(firebase_api_key, api_key, sizeof(firebase_api_key) - 1);
+//         ESP_LOGI(TAG, "API Key: %s", firebase_api_key);
+//     }
+
+//     firebase_initialized = true;
+//     ESP_LOGI(TAG, "✅ Firebase initialized");
+
+//     return ESP_OK;
+// }
+
+// esp_err_t firebase_init_with_config(const firebase_config_t *config)
+// {
+//     if (config == NULL)
+//     {
+//         ESP_LOGE(TAG, "Firebase config is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     esp_err_t ret = firebase_init(config->database_url, config->api_key);
+
+//     if (ret == ESP_OK && config->auth_token[0] != '\0')
+//     {
+//         firebase_set_auth_token(config->auth_token);
+//     }
+
+//     return ret;
+// }
+
+// esp_err_t firebase_set_data(const char *path, const char *json_data)
+// {
+//     if (!firebase_initialized)
+//     {
+//         ESP_LOGE(TAG, "Firebase not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     if (path == NULL || json_data == NULL)
+//     {
+//         ESP_LOGE(TAG, "Path or data is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     // Build URL: database_url + path + .json
+//     char url[512];
+//     snprintf(url, sizeof(url), "%s%s.json", firebase_url, path);
+
+//     // Add auth token if available
+//     if (firebase_auth_token[0] != '\0')
+//     {
+//         strncat(url, "?auth=", sizeof(url) - strlen(url) - 1);
+//         strncat(url, firebase_auth_token, sizeof(url) - strlen(url) - 1);
+//     }
+
+//     ESP_LOGI(TAG, "Firebase PUT: %s", url);
+//     ESP_LOGI(TAG, "Data: %s", json_data);
+
+//     // Reset response buffer
+//     memset(firebase_response_buffer, 0, sizeof(firebase_response_buffer));
+//     firebase_response_len = 0;
+
+//     // Configure HTTP client
+//     esp_http_client_config_t config = {
+//         .url = url,
+//         .method = HTTP_METHOD_PUT,
+//         .event_handler = http_event_handler,
+//         .timeout_ms = 10000,
+//     };
+
+//     esp_http_client_handle_t client = esp_http_client_init(&config);
+
+//     // Set headers
+//     esp_http_client_set_header(client, "Content-Type", "application/json");
+//     esp_http_client_set_post_field(client, json_data, strlen(json_data));
+
+//     // Perform request
+//     esp_err_t err = esp_http_client_perform(client);
+
+//     if (err == ESP_OK)
+//     {
+//         int status = esp_http_client_get_status_code(client);
+//         ESP_LOGI(TAG, "✅ Firebase PUT Status: %d", status);
+//         ESP_LOGI(TAG, "Response: %s", firebase_response_buffer);
+//     }
+//     else
+//     {
+//         ESP_LOGE(TAG, "❌ Firebase PUT failed: %s", esp_err_to_name(err));
+//     }
+
+//     esp_http_client_cleanup(client);
+//     return err;
+// }
+
+// esp_err_t firebase_update_data(const char *path, const char *json_data)
+// {
+//     if (!firebase_initialized)
+//     {
+//         ESP_LOGE(TAG, "Firebase not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     if (path == NULL || json_data == NULL)
+//     {
+//         ESP_LOGE(TAG, "Path or data is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     // Build URL
+//     char url[512];
+//     snprintf(url, sizeof(url), "%s%s.json", firebase_url, path);
+
+//     if (firebase_auth_token[0] != '\0')
+//     {
+//         strncat(url, "?auth=", sizeof(url) - strlen(url) - 1);
+//         strncat(url, firebase_auth_token, sizeof(url) - strlen(url) - 1);
+//     }
+
+//     ESP_LOGI(TAG, "Firebase PATCH: %s", url);
+
+//     memset(firebase_response_buffer, 0, sizeof(firebase_response_buffer));
+//     firebase_response_len = 0;
+
+//     esp_http_client_config_t config = {
+//         .url = url,
+//         .method = HTTP_METHOD_PATCH,
+//         .event_handler = http_event_handler,
+//         .timeout_ms = 10000,
+//     };
+
+//     esp_http_client_handle_t client = esp_http_client_init(&config);
+//     esp_http_client_set_header(client, "Content-Type", "application/json");
+//     esp_http_client_set_post_field(client, json_data, strlen(json_data));
+
+//     esp_err_t err = esp_http_client_perform(client);
+
+//     if (err == ESP_OK)
+//     {
+//         ESP_LOGI(TAG, "✅ Firebase PATCH Status: %d",
+//                  esp_http_client_get_status_code(client));
+//     }
+//     else
+//     {
+//         ESP_LOGE(TAG, "❌ Firebase PATCH failed: %s", esp_err_to_name(err));
+//     }
+
+//     esp_http_client_cleanup(client);
+//     return err;
+// }
+
+// esp_err_t firebase_get_data(const char *path, char *response_buffer, size_t buffer_size)
+// {
+//     if (!firebase_initialized)
+//     {
+//         ESP_LOGE(TAG, "Firebase not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     if (path == NULL || response_buffer == NULL)
+//     {
+//         ESP_LOGE(TAG, "Path or buffer is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     char url[512];
+//     snprintf(url, sizeof(url), "%s%s.json", firebase_url, path);
+
+//     if (firebase_auth_token[0] != '\0')
+//     {
+//         strncat(url, "?auth=", sizeof(url) - strlen(url) - 1);
+//         strncat(url, firebase_auth_token, sizeof(url) - strlen(url) - 1);
+//     }
+
+//     ESP_LOGI(TAG, "Firebase GET: %s", url);
+
+//     memset(firebase_response_buffer, 0, sizeof(firebase_response_buffer));
+//     firebase_response_len = 0;
+
+//     esp_http_client_config_t config = {
+//         .url = url,
+//         .method = HTTP_METHOD_GET,
+//         .event_handler = http_event_handler,
+//         .timeout_ms = 10000,
+//     };
+
+//     esp_http_client_handle_t client = esp_http_client_init(&config);
+//     esp_err_t err = esp_http_client_perform(client);
+
+//     if (err == ESP_OK)
+//     {
+//         int status = esp_http_client_get_status_code(client);
+//         ESP_LOGI(TAG, "✅ Firebase GET Status: %d", status);
+
+//         // Copy response to user buffer
+//         strncpy(response_buffer, firebase_response_buffer, buffer_size - 1);
+//         response_buffer[buffer_size - 1] = '\0';
+
+//         ESP_LOGI(TAG, "Response: %s", response_buffer);
+//     }
+//     else
+//     {
+//         ESP_LOGE(TAG, "❌ Firebase GET failed: %s", esp_err_to_name(err));
+//     }
+
+//     esp_http_client_cleanup(client);
+//     return err;
+// }
+
+// esp_err_t firebase_delete_data(const char *path)
+// {
+//     if (!firebase_initialized)
+//     {
+//         ESP_LOGE(TAG, "Firebase not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     if (path == NULL)
+//     {
+//         ESP_LOGE(TAG, "Path is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     char url[512];
+//     snprintf(url, sizeof(url), "%s%s.json", firebase_url, path);
+
+//     if (firebase_auth_token[0] != '\0')
+//     {
+//         strncat(url, "?auth=", sizeof(url) - strlen(url) - 1);
+//         strncat(url, firebase_auth_token, sizeof(url) - strlen(url) - 1);
+//     }
+
+//     ESP_LOGI(TAG, "Firebase DELETE: %s", url);
+
+//     esp_http_client_config_t config = {
+//         .url = url,
+//         .method = HTTP_METHOD_DELETE,
+//         .timeout_ms = 10000,
+//     };
+
+//     esp_http_client_handle_t client = esp_http_client_init(&config);
+//     esp_err_t err = esp_http_client_perform(client);
+
+//     if (err == ESP_OK)
+//     {
+//         ESP_LOGI(TAG, "✅ Firebase DELETE Status: %d",
+//                  esp_http_client_get_status_code(client));
+//     }
+//     else
+//     {
+//         ESP_LOGE(TAG, "❌ Firebase DELETE failed: %s", esp_err_to_name(err));
+//     }
+
+//     esp_http_client_cleanup(client);
+//     return err;
+// }
+
+// esp_err_t firebase_push_data(const char *path, const char *json_data,
+//                              char *key_buffer, size_t key_buffer_size)
+// {
+//     if (!firebase_initialized)
+//     {
+//         ESP_LOGE(TAG, "Firebase not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     if (path == NULL || json_data == NULL)
+//     {
+//         ESP_LOGE(TAG, "Path or data is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     char url[512];
+//     snprintf(url, sizeof(url), "%s%s.json", firebase_url, path);
+
+//     if (firebase_auth_token[0] != '\0')
+//     {
+//         strncat(url, "?auth=", sizeof(url) - strlen(url) - 1);
+//         strncat(url, firebase_auth_token, sizeof(url) - strlen(url) - 1);
+//     }
+
+//     ESP_LOGI(TAG, "Firebase POST: %s", url);
+
+//     memset(firebase_response_buffer, 0, sizeof(firebase_response_buffer));
+//     firebase_response_len = 0;
+
+//     esp_http_client_config_t config = {
+//         .url = url,
+//         .method = HTTP_METHOD_POST,
+//         .event_handler = http_event_handler,
+//         .timeout_ms = 10000,
+//     };
+
+//     esp_http_client_handle_t client = esp_http_client_init(&config);
+//     esp_http_client_set_header(client, "Content-Type", "application/json");
+//     esp_http_client_set_post_field(client, json_data, strlen(json_data));
+
+//     esp_err_t err = esp_http_client_perform(client);
+
+//     if (err == ESP_OK)
+//     {
+//         ESP_LOGI(TAG, "✅ Firebase POST Status: %d",
+//                  esp_http_client_get_status_code(client));
+//         ESP_LOGI(TAG, "Generated key: %s", firebase_response_buffer);
+
+//         // Extract key from response if buffer provided
+//         if (key_buffer != NULL && key_buffer_size > 0)
+//         {
+//             // Response format: {"name":"-N1234567890"}
+//             char *name_start = strstr(firebase_response_buffer, "\"name\":\"");
+//             if (name_start != NULL)
+//             {
+//                 name_start += 8; // Skip "name":"
+//                 char *name_end = strchr(name_start, '"');
+//                 if (name_end != NULL)
+//                 {
+//                     size_t len = name_end - name_start;
+//                     if (len < key_buffer_size)
+//                     {
+//                         strncpy(key_buffer, name_start, len);
+//                         key_buffer[len] = '\0';
+//                     }
+//                 }
+//             }
+//         }
+//     }
+//     else
+//     {
+//         ESP_LOGE(TAG, "❌ Firebase POST failed: %s", esp_err_to_name(err));
+//     }
+
+//     esp_http_client_cleanup(client);
+//     return err;
+// }
+
+// esp_err_t firebase_send_sensor_data(const char *device_id, uint16_t mq2_value,
+//                                     uint8_t fire_detected, float temperature,
+//                                     float humidity)
+// {
+//     char path[128];
+//     snprintf(path, sizeof(path), "/sensors/%s", device_id);
+
+//     char json_data[512];
+//     uint64_t timestamp = get_timestamp_ms();
+
+//     snprintf(json_data, sizeof(json_data),
+//              "{\"mq2\":%d,\"fire\":%d,\"temperature\":%.1f,\"humidity\":%.1f,"
+//              "\"timestamp\":%lld,\"device\":\"%s\"}",
+//              mq2_value, fire_detected, temperature, humidity, timestamp, device_id);
+
+//     ESP_LOGI(TAG, "Sending sensor data to Firebase...");
+//     return firebase_set_data(path, json_data);
+// }
+
+// esp_err_t firebase_set_auth_token(const char *token)
+// {
+//     if (token == NULL)
+//     {
+//         ESP_LOGE(TAG, "Auth token is NULL");
+//         return ESP_FAIL;
+//     }
+
+//     strncpy(firebase_auth_token, token, sizeof(firebase_auth_token) - 1);
+//     ESP_LOGI(TAG, "✅ Firebase auth token set");
+//     return ESP_OK;
+// }
+
+// bool firebase_is_initialized(void)
+// {
+//     return firebase_initialized;
+// }
+
+// #pragma endregion
+
+// ============================================================================
+// Utility Functions Implementation
+// ============================================================================
+
+uint64_t get_timestamp_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)(tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
+}
+
+esp_err_t get_iso_timestamp(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size < 25)
+    {
+        return ESP_FAIL;
+    }
+
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    gmtime_r(&now, &timeinfo);
+
+    strftime(buffer, buffer_size, "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+    return ESP_OK;
+}

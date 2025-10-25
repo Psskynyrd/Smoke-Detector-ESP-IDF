@@ -28,7 +28,10 @@ typedef struct
     uint16_t received_message_len;
     bool new_message_available;
     void (*message_received_callback)(const char *message, uint16_t len);
+    char device_name[256];
 } ble_t;
+
+extern ble_t ble_data;
 
 void ble_init(void);
 // esp_err_t send_message(char message);
@@ -127,5 +130,8 @@ void clear_received_message(void);
  */
 void register_message_callback(void (*callback)(const char* message, uint16_t len));
 
+
+// Disconnect Function
+void disconnect_ble(void);
 
 #endif

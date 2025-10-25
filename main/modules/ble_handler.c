@@ -26,7 +26,7 @@ enum
     IDX_CHAR_WRITE_VAL,
     IDX_CHAR_NOTIFY,
     IDX_CHAR_NOTIFY_VAL,
-    IDX_CHAR_NOTIFY_CFG, 
+    IDX_CHAR_NOTIFY_CFG,
     HRS_IDX_NB,
 };
 
@@ -44,6 +44,7 @@ static uint8_t char_notify_ccc[2] = {0x00, 0x00};
 // Characteristic values
 static uint8_t char_write_value[512] = {0};
 static uint8_t char_notify_value[512] = "BLE_READY";
+static esp_bd_addr_t remote_bda = {0};
 
 // Standard GATT UUIDs
 static uint16_t primary_service_uuid = ESP_GATT_UUID_PRI_SERVICE;
@@ -263,7 +264,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         ESP_LOGI(GATTS_TAG, "REGISTER_APP_EVT, status %d, app_id %d", param->reg.status, param->reg.app_id);
 
         // Set device name before creating attribute table
-        esp_err_t ret = esp_ble_gap_set_device_name(BLE_DEVICE_NAME);
+        esp_err_t ret = esp_ble_gap_set_device_name(ble_data.device_name);
         if (ret != ESP_OK)
         {
             ESP_LOGE(GATTS_TAG, "Set device name failed: %s", esp_err_to_name(ret));
@@ -491,11 +492,11 @@ void ble_init(void)
 /**
  * Send long text message via BLE notification (handles messages up to 800 bytes)
  * Automatically splits into multiple packets if needed
- * 
+ *
  * @param message: Message string to send (supports up to 800 bytes)
  * @return ESP_OK if message sent successfully, ESP_FAIL otherwise
  */
-esp_err_t send_message(const char* message)
+esp_err_t send_message(const char *message)
 {
     // Check if client is connected and notifications are enabled
     if (conn_id_global == 0xffff || char_notify_ccc[0] != 0x01)
@@ -511,7 +512,7 @@ esp_err_t send_message(const char* message)
     }
 
     int message_len = strlen(message);
-    
+
     if (message_len == 0)
     {
         ESP_LOGW(GATTS_TAG, "Message is empty");
@@ -524,7 +525,7 @@ esp_err_t send_message(const char* message)
     // Safe chunk size: MTU - 3 (for BLE overhead)
     // Using conservative 100 bytes per chunk for compatibility
     const int CHUNK_SIZE = 100;
-    
+
     // If message fits in one packet, send directly
     if (message_len <= CHUNK_SIZE)
     {
@@ -549,17 +550,17 @@ esp_err_t send_message(const char* message)
 
     // Message is too long - split into multiple packets
     ESP_LOGI(GATTS_TAG, "Message too long (%d bytes), splitting into chunks...", message_len);
-    
+
     int total_chunks = (message_len + CHUNK_SIZE - 1) / CHUNK_SIZE;
     int offset = 0;
-    
+
     for (int chunk = 0; chunk < total_chunks; chunk++)
     {
         int remaining = message_len - offset;
         int chunk_len = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
-        
+
         ESP_LOGI(GATTS_TAG, "Sending chunk %d/%d (%d bytes)", chunk + 1, total_chunks, chunk_len);
-        
+
         // Send chunk
         esp_err_t ret = esp_ble_gatts_send_indicate(gatts_if_global,
                                                     conn_id_global,
@@ -575,9 +576,9 @@ esp_err_t send_message(const char* message)
         }
 
         ESP_LOGI(GATTS_TAG, "✅ Chunk %d/%d sent", chunk + 1, total_chunks);
-        
+
         offset += chunk_len;
-        
+
         // Small delay between chunks to prevent buffer overflow
         // Adjust this delay based on your needs (20-100ms recommended)
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -591,7 +592,7 @@ esp_err_t send_message(const char* message)
  * Alternative: Send message with custom chunk size
  * Use this if you need more control over packet size
  */
-esp_err_t send_message_with_chunk_size(const char* message, int chunk_size)
+esp_err_t send_message_with_chunk_size(const char *message, int chunk_size)
 {
     if (conn_id_global == 0xffff || char_notify_ccc[0] != 0x01)
     {
@@ -612,7 +613,7 @@ esp_err_t send_message_with_chunk_size(const char* message, int chunk_size)
     }
 
     int message_len = strlen(message);
-    
+
     if (message_len == 0)
     {
         ESP_LOGW(GATTS_TAG, "Message is empty");
@@ -623,12 +624,12 @@ esp_err_t send_message_with_chunk_size(const char* message, int chunk_size)
 
     int total_chunks = (message_len + chunk_size - 1) / chunk_size;
     int offset = 0;
-    
+
     for (int chunk = 0; chunk < total_chunks; chunk++)
     {
         int remaining = message_len - offset;
         int current_chunk_len = (remaining > chunk_size) ? chunk_size : remaining;
-        
+
         esp_err_t ret = esp_ble_gatts_send_indicate(gatts_if_global,
                                                     conn_id_global,
                                                     handle_table[IDX_CHAR_NOTIFY_VAL],
@@ -641,7 +642,7 @@ esp_err_t send_message_with_chunk_size(const char* message, int chunk_size)
             ESP_LOGE(GATTS_TAG, "Failed to send chunk %d/%d", chunk + 1, total_chunks);
             return ESP_FAIL;
         }
-        
+
         offset += current_chunk_len;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -654,7 +655,7 @@ esp_err_t send_message_with_chunk_size(const char* message, int chunk_size)
  * Optimized version: Uses larger chunks for better performance
  * Note: Requires char_notify_value[512] or larger in ble_handler.c
  */
-esp_err_t send_message_optimized(const char* message)
+esp_err_t send_message_optimized(const char *message)
 {
     if (conn_id_global == 0xffff || char_notify_ccc[0] != 0x01)
     {
@@ -669,7 +670,7 @@ esp_err_t send_message_optimized(const char* message)
     }
 
     int message_len = strlen(message);
-    
+
     if (message_len == 0)
     {
         ESP_LOGW(GATTS_TAG, "Message is empty");
@@ -679,7 +680,7 @@ esp_err_t send_message_optimized(const char* message)
     // Use 244 bytes (MTU 247 - 3 bytes overhead)
     // This works with most modern BLE implementations
     const int CHUNK_SIZE = 244;
-    
+
     if (message_len <= CHUNK_SIZE)
     {
         // Send in one go
@@ -689,24 +690,24 @@ esp_err_t send_message_optimized(const char* message)
                                                     message_len,
                                                     (uint8_t *)message,
                                                     false);
-        
+
         if (ret == ESP_OK)
         {
             ESP_LOGI(GATTS_TAG, "Message sent: %d bytes", message_len);
         }
-        
+
         return ret;
     }
 
     // Split and send
     int offset = 0;
     int chunk_num = 0;
-    
+
     while (offset < message_len)
     {
         int remaining = message_len - offset;
         int chunk_len = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
-        
+
         esp_err_t ret = esp_ble_gatts_send_indicate(gatts_if_global,
                                                     conn_id_global,
                                                     handle_table[IDX_CHAR_NOTIFY_VAL],
@@ -719,10 +720,10 @@ esp_err_t send_message_optimized(const char* message)
             ESP_LOGE(GATTS_TAG, "Failed sending chunk %d", chunk_num);
             return ESP_FAIL;
         }
-        
+
         chunk_num++;
         offset += chunk_len;
-        
+
         // Shorter delay for better performance
         vTaskDelay(pdMS_TO_TICKS(30));
     }
@@ -735,7 +736,7 @@ esp_err_t send_message_optimized(const char* message)
  * Send sensor data formatted as JSON
  * This is a convenience function for common sensor data
  */
-// esp_err_t send_sensor_data(uint16_t mq2_value, uint8_t fire_detected, 
+// esp_err_t send_sensor_data(uint16_t mq2_value, uint8_t fire_detected,
 //                            float temperature, float humidity)
 // {
 //     char json_message[256];
@@ -743,13 +744,13 @@ esp_err_t send_message_optimized(const char* message)
 //                       "{\"mq2\":%d,\"fire\":%d,\"temp\":%.1f,\"hum\":%.1f,\"timestamp\":%lld}",
 //                       mq2_value, fire_detected, temperature, humidity,
 //                       (long long)(esp_timer_get_time() / 1000));
-    
+
 //     if (len >= sizeof(json_message))
 //     {
 //         ESP_LOGE(GATTS_TAG, "Sensor JSON too long");
 //         return ESP_FAIL;
 //     }
-    
+
 //     return send_message(json_message);
 // }
 
@@ -757,21 +758,21 @@ esp_err_t send_message_optimized(const char* message)
  * Send formatted message (printf-style)
  * Example: send_formatted_message("Temp: %.1f, Humidity: %.1f", temp, hum);
  */
-esp_err_t send_formatted_message(const char* format, ...)
+esp_err_t send_formatted_message(const char *format, ...)
 {
     char buffer[512];
     va_list args;
-    
+
     va_start(args, format);
     int len = vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    
+
     if (len >= sizeof(buffer))
     {
         ESP_LOGE(GATTS_TAG, "Formatted message too long: %d bytes", len);
         return ESP_FAIL;
     }
-    
+
     return send_message(buffer);
 }
 /**
@@ -934,5 +935,24 @@ void register_message_callback(void (*callback)(const char *message, uint16_t le
     else
     {
         ESP_LOGI(GATTS_TAG, "Message callback unregistered");
+    }
+}
+void disconnect_ble(void)
+{
+    if (conn_id_global != 0)
+    {
+        esp_err_t ret = esp_ble_gap_disconnect(remote_bda);
+        if (ret == ESP_OK)
+        {
+            ESP_LOGI(GATTS_TAG, "Disconnecting BLE device (conn_id=%d)...", conn_id_global);
+        }
+        else
+        {
+            ESP_LOGE(GATTS_TAG, "Failed to disconnect, error code: %s", esp_err_to_name(ret));
+        }
+    }
+    else
+    {
+        ESP_LOGW(GATTS_TAG, "No active BLE connection to disconnect");
     }
 }
